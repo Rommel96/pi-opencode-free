@@ -51,6 +51,67 @@ function fromStoredModel<M extends { provider?: unknown; baseUrl?: unknown }>(m:
   return config as unknown as ReturnType<typeof toProviderModel>;
 }
 
+const OPENCODE_UA = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+const HEX = "0123456789abcdef";
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const pick = (chars: string): string => chars[Math.floor(Math.random() * chars.length)] as string;
+const repeat = (n: number, chars: string): string =>
+  Array.from({ length: n }, () => pick(chars)).join("");
+
+/**
+ * A session id the free tier accepts: `ses_` + 12 lowercase hex + 14 base62.
+ * The last three hex digits must land in 0xFC0..0xFFF (decrementing-timestamp layout).
+ */
+export const newZenSessionId = (): string =>
+  `ses_${repeat(9, HEX)}f${pick("cdef")}${pick(HEX)}${repeat(14, BASE62)}`;
+
+const GATE_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "bash",
+      description: "Placeholder required by the OpenCode free-tier request shape.",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read",
+      description: "Placeholder required by the OpenCode free-tier request shape.",
+      parameters: {
+        type: "object",
+        properties: { filePath: { type: "string" } },
+        required: ["filePath"],
+      },
+    },
+  },
+];
+
+export function shapeZenPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const p = { ...(payload as Record<string, unknown>) };
+  p.stream = true;
+  const tools = Array.isArray(p.tools) ? [...p.tools] : [];
+  const names = new Set(
+    tools.map((t) => (t as { function?: { name?: string } })?.function?.name).filter(Boolean),
+  );
+  let injected = false;
+  for (const gate of GATE_TOOLS) {
+    if (!names.has(gate.function.name)) {
+      tools.push(gate);
+      injected = true;
+    }
+  }
+  p.tools = tools;
+  if (injected && p.tool_choice === undefined) p.tool_choice = "auto";
+  return p;
+}
+
 export default function opencodeDirectExtension(pi: ExtensionAPI): void {
   // Registered once with an empty list; models come exclusively through
   // refreshModels (snapshot restore on session init, live discovery on
@@ -65,15 +126,7 @@ export default function opencodeDirectExtension(pi: ExtensionAPI): void {
     headers: {
       "x-opencode-client": "cli",
       "x-opencode-project": "global",
-      "User-Agent": "opencode/0.0.0-dev",
-      // Zen's free tier rejects every Bearer token with 401. Provider-level
-      // headers reach the OpenAI SDK's defaultHeaders even on pi's native
-      // request path (ModelsRuntime.prepareRequest → composeModelProvider),
-      // and `Authorization: null` is the SDK's supported way to omit the
-      // header entirely. This covers Responses-API models (e.g. muse-spark),
-      // which bypass the streamSimple shim below because pi only routes
-      // through it when model.api === provider api ("openai-completions").
-      Authorization: null as unknown as string,
+      "User-Agent": OPENCODE_UA,
     },
     models: [],
     async refreshModels(ctx) {
@@ -99,9 +152,22 @@ export default function opencodeDirectExtension(pi: ExtensionAPI): void {
         api === "openai-responses"
           ? (nativeOpenAIResponsesStream as typeof nativeOpenAICompletionsStream)
           : nativeOpenAICompletionsStream;
+      const session = newZenSessionId();
       return native(model as Parameters<typeof nativeOpenAICompletionsStream>[0], context, {
         ...options,
-        headers: { ...options?.headers, Authorization: null },
+        headers: {
+          ...options?.headers,
+          Authorization: null,
+          "User-Agent": OPENCODE_UA,
+          "x-opencode-session": session,
+          "x-opencode-session-id": session,
+          "x-opencode-client": "cli",
+          "x-opencode-project": "global",
+        },
+        onPayload: async (payload, hookModel) => {
+          const modified = (await options?.onPayload?.(payload, hookModel)) ?? payload;
+          return shapeZenPayload(modified);
+        },
       });
     },
   });

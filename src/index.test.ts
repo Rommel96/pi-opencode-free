@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import opencodeDirectExtension from "./index.js";
+import opencodeDirectExtension, { newZenSessionId, shapeZenPayload } from "./index.js";
 import { discoverModels } from "./discovery.js";
 
 test("registers provider once with empty initial models and no boot fetch", async () => {
@@ -177,4 +177,19 @@ test("registers no slash commands", async () => {
     await opencodeDirectExtension(fakePi);
     assert.deepEqual(commands, []);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("newZenSessionId generates valid session format", () => {
+  const id = newZenSessionId();
+  assert.match(id, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+});
+
+test("shapeZenPayload injects stream: true and bash/read placeholder tools", () => {
+  const emptyPayload = { model: "test" };
+  const shaped = shapeZenPayload(emptyPayload) as any;
+  assert.equal(shaped.stream, true);
+  assert.equal(shaped.tools?.length, 2);
+  assert.equal(shaped.tools[0].function.name, "bash");
+  assert.equal(shaped.tools[1].function.name, "read");
+  assert.equal(shaped.tool_choice, "auto");
 });
