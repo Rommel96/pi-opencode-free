@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import opencodeDirectExtension, { newZenSessionId, shapeZenPayload } from "./index.js";
+import opencodeDirectExtension, { getCurrentTools, newZenSessionId, shapeZenPayload } from "./index.js";
 import { discoverModels } from "./discovery.js";
 
 test("registers provider once with empty initial models and no boot fetch", async () => {
@@ -193,3 +193,56 @@ test("shapeZenPayload injects stream: true and bash/read placeholder tools", () 
   assert.equal(shaped.tools[1].function.name, "read");
   assert.equal(shaped.tool_choice, "auto");
 });
+
+test("shapeZenPayload uses path parameter for fallback read tool", () => {
+  const shaped = shapeZenPayload({ model: "test" }) as any;
+  const readTool = shaped.tools?.find((t: any) => t.function?.name === "read");
+  assert.ok(readTool);
+  assert.equal(readTool.function.parameters.required[0], "path");
+  assert.ok(readTool.function.parameters.properties.path);
+  assert.equal(readTool.function.parameters.properties.filePath, undefined);
+});
+
+test("shapeZenPayload preserves existing tools and does not overwrite read/bash", () => {
+  const existingPayload = {
+    model: "test",
+    tools: [
+      { type: "function", function: { name: "subagent_run", parameters: {} } },
+      { type: "function", function: { name: "read", parameters: { properties: { path: { type: "string" } } } } },
+    ],
+  };
+  const shaped = shapeZenPayload(existingPayload) as any;
+  assert.equal(shaped.stream, true);
+  assert.equal(shaped.tools?.length, 3);
+  assert.equal(shaped.tools[0].function.name, "subagent_run");
+  assert.equal(shaped.tools[1].function.name, "read");
+  assert.equal(shaped.tools[1].function.parameters.properties.path.type, "string");
+  assert.equal(shaped.tools[2].function.name, "bash");
+});
+
+test("getCurrentTools extracts tools added in system messages and honors removals", () => {
+  const messages = [
+    {
+      role: "system",
+      content: "prompt",
+      toolsAdded: [
+        { name: "read", description: "Read file", parameters: {} },
+        { name: "subagent_run", description: "Run subagent", parameters: {} },
+      ],
+    },
+    {
+      role: "user",
+      content: "hello",
+    },
+    {
+      role: "system",
+      toolsRemoved: [{ name: "read" }],
+      toolsAdded: [{ name: "read_v2", description: "Read file v2", parameters: {} }],
+    },
+  ];
+  const tools = getCurrentTools(messages);
+  assert.equal(tools.length, 2);
+  const names = (tools as any[]).map((t: any) => t.name);
+  assert.deepEqual(names, ["subagent_run", "read_v2"]);
+});
+

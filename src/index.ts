@@ -85,12 +85,36 @@ const GATE_TOOLS = [
       description: "Placeholder required by the OpenCode free-tier request shape.",
       parameters: {
         type: "object",
-        properties: { filePath: { type: "string" } },
-        required: ["filePath"],
+        properties: { path: { type: "string" } },
+        required: ["path"],
       },
     },
   },
 ];
+
+/** Extract active tools from transcript system messages (toolsAdded/toolsRemoved). */
+export function getCurrentTools(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  const tools = new Map<string, unknown>();
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || (message as { role?: string }).role !== "system") {
+      continue;
+    }
+    const removed = (message as { toolsRemoved?: Array<{ name?: string }> }).toolsRemoved;
+    if (Array.isArray(removed)) {
+      for (const t of removed) {
+        if (t?.name) tools.delete(t.name);
+      }
+    }
+    const added = (message as { toolsAdded?: Array<{ name?: string }> }).toolsAdded;
+    if (Array.isArray(added)) {
+      for (const t of added) {
+        if (t?.name) tools.set(t.name, t);
+      }
+    }
+  }
+  return [...tools.values()];
+}
 
 export function shapeZenPayload(payload: unknown): unknown {
   if (!payload || typeof payload !== "object") return payload;
@@ -153,7 +177,18 @@ export default function opencodeDirectExtension(pi: ExtensionAPI): void {
           ? (nativeOpenAIResponsesStream as typeof nativeOpenAICompletionsStream)
           : nativeOpenAICompletionsStream;
       const session = newZenSessionId();
-      return native(model as Parameters<typeof nativeOpenAICompletionsStream>[0], context, {
+      const currentTools =
+        (context as { tools?: unknown[] })?.tools && (context as { tools?: unknown[] }).tools!.length > 0
+          ? (context as { tools?: unknown[] }).tools
+          : getCurrentTools((context as { messages?: unknown[] })?.messages);
+      const effectiveContext =
+        currentTools && currentTools.length > 0
+          ? { ...context, tools: currentTools }
+          : context;
+      return native(
+        model as Parameters<typeof nativeOpenAICompletionsStream>[0],
+        effectiveContext as Parameters<typeof nativeOpenAICompletionsStream>[1],
+        {
         ...options,
         headers: {
           ...options?.headers,
@@ -166,9 +201,11 @@ export default function opencodeDirectExtension(pi: ExtensionAPI): void {
         },
         onPayload: async (payload, hookModel) => {
           const modified = (await options?.onPayload?.(payload, hookModel)) ?? payload;
-          return shapeZenPayload(modified);
+          const shaped = shapeZenPayload(modified);
+          return shaped;
         },
       });
     },
   });
 }
+
